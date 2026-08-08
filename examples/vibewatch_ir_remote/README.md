@@ -89,3 +89,10 @@ The advertised device name is set to `VibeWatch IR` (12 characters). BLE
 legacy advertising packets are limited to 31 bytes total, and a name longer
 than approximately 18 ASCII characters can prevent the device from being
 discovered by the host. Keep the name short if you change it.
+
+## Technical Details
+
+For a deep technical explanation of the BLE HID transmission layer,
+including the Vendor Report format, the JSON-RPC protocol, and the
+mapping from IR codes to host events, see
+[TECHNICAL.ja.md](TECHNICAL.ja.md) (Japanese).
