@@ -12,9 +12,11 @@ Bluetooth Low Energy（BLE）経由でホストへ送信する仕組みを、プ
 - **出力層**: `NimBLE-Arduino` による BLE HID（Human Interface Device）
 
 M5Stack StopWatch 版の Vibe Watch と同じホストプロトコルを使うため、
-ホスト側ソフトウェアは変更しなくても動作します。M5Unified や円形ディスプレイ、
-振動モーターなどの HW 依存を外し、ESP32 + IR 受信モジュールだけで動くように
-簡略化されています。
+ホスト側ソフトウェアは変更しなくても動作します。ただし、このスケッチでは
+ChatGPT Desktop の Codex Micro 機能と接続するため、BLE のデバイス名、
+メーカー名、PnP ID を Codex Micro と同一に見せるように設定しています。
+M5Unified や円形ディスプレイ、振動モーターなどの HW 依存を外し、
+ESP32 + IR 受信モジュールだけで動くように簡略化されています。
 
 ## 2. BLE HID over GATT
 
@@ -41,6 +43,8 @@ Descriptor）** でホストに告げます。Vibe Watch では 4 種類のレ�
 スケッチ内では `vibe::kReportMap` としてコピーして使用しています。
 重要なのは **Report ID 6** の **Vendor レポート** で、これを使って
 エージェント選択やアクションイベントをホストへ通知します。
+このレポート記述子は Codex Micro の BLE 記述子と互換性があり、
+ChatGPT Desktop が Codex Micro として認識できるようになっています。
 
 ## 4. BLE 接続・Advertising・セキュリティ
 
@@ -67,14 +71,15 @@ g_hid = new NimBLEHIDDevice(g_server);
 ```cpp
 auto* advertising = NimBLEDevice::getAdvertising();
 advertising->setName(vibe::kDeviceName);
-advertising->setAppearance(HID_KEYBOARD);
+advertising->setAppearance(GENERIC_HID);
 advertising->addServiceUUID(g_hid->getHidService()->getUUID());
 advertising->enableScanResponse(true);
 advertising->start();
 ```
 
-ホストはこの Advertising パケットを見て「Bluetooth キーボードのような
-HID デバイスがある」と認識します。
+ホストはこの Advertising パケットを見て HID デバイスを認識します。
+`vibe::kDeviceName` は `Codex Micro` に設定されているため、
+ChatGPT Desktop はこれを Codex Micro コントローラーとして検出します。
 
 ### Advertising Name 長の制限
 
@@ -82,9 +87,22 @@ BLE のレガシー Advertising パケットは **最大 31 バイト** です�
 flags、appearance、service UUID などの固定部分でおよそ 13 バイトを
 使うため、デバイス名は **18 文字以内** に収める必要があります。
 
-このスケッチでは `VibeWatch IR`（12 文字）を使っており、パケット
+このスケッチでは `Codex Micro`（11 文字）を使っており、パケット
 オーバーフローを避けています。名前を変更する場合は必ず短く
 （推奨 18 文字以下）にしてください。
+
+### PnP ID
+
+```cpp
+g_hid->setManufacturer(vibe::kManufacturer);  // "Work Louder"
+g_hid->setPnp(0x02, vibe::kVendorId, vibe::kProductId, vibe::kProductVersion);
+// vendorId = 0x303A, productId = 0x8360, productVersion = 0x0101
+```
+
+Codex Micro は USB Implementer's Forum のベンダー ID ソース（`0x02`）と、
+Espressif の VID `0x303A`、Codex Micro の PID `0x8360` を使って識別されます。
+これらを一致させることで、ChatGPT Desktop は正規の Codex Micro として
+ハンドシェイクを開始します。
 
 ## 5. Vendor Report と JSON-RPC
 
@@ -102,17 +120,48 @@ Vibe Watch 独自の制御は **Report ID 6** の 63 バイト Vendor レポー�
 
 ### 送信例
 
-OK ボタンが押された場合、次のような JSON を送信します。
+Agent 1 ボタンが押された場合、次のような JSON を送信します。
 
 ```text
-{"m":"v.oai.hid","p":{"k":"ACT08","act":1}}
+{"m":"v.oai.hid","p":{"k":"AG00","act":1}}
 ```
 
 離された場合は `act` が `0` になります。
 
 ```text
-{"m":"v.oai.hid","p":{"k":"ACT08","act":0}}
+{"m":"v.oai.hid","p":{"k":"AG00","act":0}}
 ```
+
+### ホストからのリクエスト
+
+Codex Micro のハンドシェイクでは、ホストがデバイスに対して
+`sys.version` や `device.status` などの JSON-RPC リクエストを送ります。
+そのため、Vendor レポートの **Output** 側にもコールバックを登録し、
+ホストからの書き込みを受け取って応答します。
+
+```cpp
+g_vendorOutput = g_hid->getOutputReport(vibe::kVendorReportId);
+g_vendorOutput->setCallbacks(&g_rpcCallbacks);
+```
+
+`RpcOutputCallbacks::onWrite()` では、チャネル番号（2）と長さバイトを
+確認し、複数のフレームに分割された JSON を再構成して `processRpc()` に
+渡します。macOS は Output レポートの先頭に Report ID（6）を付加する
+ことがあるため、Report ID 付き・なしの両方を受け入れます。
+
+応答する主なメソッドは以下の通りです。
+
+| メソッド | 応答内容 |
+|---|---|
+| `sys.version` | ファームウェアバージョン |
+| `device.status` | バージョン、プロファイル/レイヤー、バッテリー、充電状態 |
+| `v.oai.thstatus` | `{"ok":true}` |
+| `v.oai.rgbcfg` | `{"ok":true}` |
+| `host.focused_app` | `{"ok":true}` |
+| `lights.preview` | `{"ok":true}` |
+
+これらの応答がないと、ChatGPT Desktop は「検出したが接続できない」状態で
+止まってしまいます。
 
 ## 6. イベント送信関数
 
@@ -170,38 +219,75 @@ void sendActionEvent(int index, bool pressed) {
 | 外側インデックス | 送信キー | 備考 |
 |---|---|---|
 | 0 | ACT06 | FAST |
-| 1 | ACT07 | NG |
-| 2 | ACT08 | OK |
+| 1 | ACT07 | OK（コード内では `IR_CODE_OK`） |
+| 2 | ACT08 | NG（コード内では `IR_CODE_NG`） |
 | 3 | ACT09 | PLAN、ローカルフラグもトグル |
 | 4 | ACT12 | AI |
 
 PLAN だけ特別扱いで、ローカル変数 `g_planModeEnabled` を反転します。
 これはホストへ状態を送る前にデバイス側でもモードを覚えておくためです。
 
-### `sendMicEvent`
+### `sendMicEvent` と `triggerMic`
 
 ```cpp
 void sendMicEvent(bool pressed) {
   sendActionEvent(10, pressed);
-  delay(12);
-  sendActionEvent(11, pressed);
+}
+
+void triggerMic(bool fromRepeat) {
+  if (fromRepeat) return;
+  g_micRecording = !g_micRecording;
+  sendMicEvent(g_micRecording);
 }
 ```
 
-マイク（Push-to-Talk）では `ACT10` と `ACT11` を 12ms 間隔で
-ペアで送信します。これは NimBLE の notify が非同期であるため、
-`ACT11` が `ACT10` を上書きしてしまうのを避けるための猶予です。
+IR リモコンはボタンを離したことを検出できないため、マイクは
+トグルとして動作します。`ACT10` DOWN で録音を開始し、次の押下で
+`ACT10` UP で録音を停止します。リピートフレームは無視するので、
+長押ししても状態が連続して反転することはありません。
+
+### `sendJoystickEvent`
+
+アナログスティックの方向は `v.oai.rad` メソッドでホストに通知します。
+
+```cpp
+void sendJoystickEvent(float angle, float distance) {
+  std::snprintf(
+      reinterpret_cast<char*>(&report[2]), vibe::kRpcChunkLength,
+      "{\"method\":\"v.oai.rad\",\"params\":{\"a\":%.2f,\"d\":%.2f}}\r\n",
+      angle, distance);
+}
+```
+
+角度は Codex Micro プロトコルに合わせて正規化されています。
+
+| 方向 | 角度 |
+|---|---|
+| 右 | 0.00 |
+| 下 | 0.25 |
+| 左 | 0.50 |
+| 上 | 0.75 |
+
+押下時に `distance = 1.0`、リリース時に `distance = 0.0` を送ります。
 
 ## 7. IR 入力から BLE 送信までの流れ
 
 1. `irrecv.decode(&results)` が IR 受信を検出
-2. `results.value` に応じて `triggerAgent()` / `triggerAction()` / `triggerMic()` を呼び出し
-3. 各 `triggerXxx()` は「press → 50ms または 100ms 待機 → release」を送信
-4. 実際の BLE 送信は `sendKeyEvent()` → `g_vendorInput->notify()`
+2. `results.value` が `0xFFFFFFFF` または `0xFFFFFFFFFFFFFFFF` ならリピート
+   コードとして扱い、直前の有効コードに置き換える
+3. `results.value` に応じて `triggerAgent()` / `triggerAction()` /
+   `triggerMic()` / `triggerJoystick()` を呼び出し
+4. 各 `triggerXxx()` は「press → 50ms または 100ms 待機 → release」を送信
+5. 実際の BLE 送信は `sendKeyEvent()` / `sendJoystickEvent()` →
+   `g_vendorInput->notify()`
 
 例えば Agent 1 ボタンを押すと、`AG00` の pressed と released が
 連続して送信され、ホスト側では「Agent 0 が選択された」という
 短いクリックイベントとして認識されます。
+
+マイクのトグルとアナログスティックの方向は、リピートフレームを
+特別に扱います。マイクはリピートを無視し、アナログスティックは
+リピートコードを同じ方向の連続入力として扱います。
 
 ## 8. 接続状態の管理
 
