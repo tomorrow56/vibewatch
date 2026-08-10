@@ -50,11 +50,9 @@ const char* password   = "<your_password>";
 IPAddress ipadr;
 
 const char* ntpServer = "ntp.jst.mfeed.ad.jp";
-const long  gmtOffset_sec = 9 * 3600;  // JST = UTC + 9
-const int   daylightOffset_sec = 0;
+const char* timeZone = "JST-9";
 int hh, mm, ss;
 int yy, mon, dd;
-int retry = 5;
 
 String cc[12]={"45","40","35","30","25","20","15","10","05","0","55","50"};
 String days[]={"SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"};
@@ -111,6 +109,29 @@ void switchToVibeWatchMode()
   vibeWatchSetup();
 }
 
+bool syncRtcFromNtp()
+{
+  configTzTime(timeZone, ntpServer);
+
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 15000)) {
+    Serial.println("NTP sync failed; using the RTC time.");
+    return false;
+  }
+
+  M5Dial.Rtc.setDateTime({
+    {static_cast<int16_t>(timeinfo.tm_year + 1900),
+     static_cast<int8_t>(timeinfo.tm_mon + 1),
+     static_cast<int8_t>(timeinfo.tm_mday)},
+    {static_cast<int8_t>(timeinfo.tm_hour),
+     static_cast<int8_t>(timeinfo.tm_min),
+     static_cast<int8_t>(timeinfo.tm_sec)}
+  });
+
+  Serial.println("NTP time synced to RTC.");
+  return true;
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -121,55 +142,21 @@ void setup()
   Serial.print("Connect to " + (String)ssid);
   WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED)
-  {
-      delay(500);
-      Serial.print(".");
+  const unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000) {
+    delay(500);
+    Serial.print(".");
   }
-  Serial.println(" CONNECTED");
 
-  //init and get the time from ntp
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-
-  struct tm timeinfo;
-// int tm_sec;   /* 秒 － [0, 60/61] */
-// int tm_min;   /* 分 － [0, 59] */
-// int tm_hour;  /* 時 － [0, 23] */
-// int tm_mday;  /* 日 － [1, 31] */
-// int tm_mon;   /* 1月からの月数 － [0, 11] */
-// int tm_year;  /* 1900年からの年数 */
-// int tm_wday;  /* 日曜日からの日数 － [0, 6] */
-// int tm_yday;  /* 1月1日からの日数 － [0, 365] */
-// int tm_isdst; /* 夏時間フラグ */
-
-  for(int i = 0; i < retry; i++)
-  {
-    if(!getLocalTime(&timeinfo))
-    {
-      Serial.println("Failed to obtain time");
-      if(i == retry - 1)
-      {
-        return;
-      }
-    }else{
-      Serial.println("Connected to NTP Server!");
-      break;
-    }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println(" CONNECTED");
+    syncRtcFromNtp();
+  } else {
+    Serial.println(" FAILED; using the RTC time.");
   }
-  
-  yy = 1900 + timeinfo.tm_year;
-  mon = timeinfo.tm_mon + 1;
-  dd = timeinfo.tm_mday;
- 
-  hh = timeinfo.tm_hour;
-  mm = timeinfo.tm_min;
-  ss = timeinfo.tm_sec;
 
-  //disconnect WiFi as it's no longer needed
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
-
-  M5Dial.Rtc.setDateTime( { { yy, mon, dd }, { hh, mm, ss } } );
   sprite.createSprite(240,240);
    
   sprite.setSwapBytes(true);    
