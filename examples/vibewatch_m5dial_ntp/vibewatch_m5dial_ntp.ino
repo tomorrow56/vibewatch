@@ -44,13 +44,14 @@ int sy=120;
 #include <WiFi.h>
 //#include <TimeLib.h>        // https://forum.arduino.cc/index.php?topic=415296.0
 #include "time.h"
+#include <sys/time.h>
 
 const char* ssid       = "<your_ssid>";
 const char* password   = "<your_password>";
 IPAddress ipadr;
 
-const char* ntpServer = "ntp.jst.mfeed.ad.jp";
-const char* timeZone = "JST-9";
+const char* ntpServer = "ntp.nict.jp";
+constexpr time_t kJstOffsetSeconds = 9 * 60 * 60;
 int hh, mm, ss;
 int yy, mon, dd;
 
@@ -93,11 +94,15 @@ void switchToClockMode()
 {
   vibeWatchReleaseCanvas();
   appMode = AppMode::Clock;
-  if (sprite.getPointer() == nullptr) {
-    sprite.createSprite(240,240);
-    sprite.setSwapBytes(true);
-    sprite.setTextDatum(4);
+  sprite.deleteSprite();
+  delay(20);
+  if (sprite.createSprite(240, 240) == nullptr) {
+    Serial.println("Clock canvas allocation failed; restarting.");
+    delay(100);
+    ESP.restart();
   }
+  sprite.setSwapBytes(true);
+  sprite.setTextDatum(4);
   sprite.fillSprite(TFT_BLACK);
 }
 
@@ -111,21 +116,29 @@ void switchToVibeWatchMode()
 
 bool syncRtcFromNtp()
 {
-  configTzTime(timeZone, ntpServer);
+  // M5Dial restores the RTC value into system time at boot. Clear it so
+  // getLocalTime waits for a fresh NTP response instead of accepting it.
+  const timeval invalidTime = {0, 0};
+  settimeofday(&invalidTime, nullptr);
+  configTime(0, 0, ntpServer);
 
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo, 15000)) {
+  struct tm utcTime;
+  if (!getLocalTime(&utcTime, 15000)) {
     Serial.println("NTP sync failed; using the RTC time.");
     return false;
   }
 
+  const time_t jstEpoch = time(nullptr) + kJstOffsetSeconds;
+  struct tm jstTime;
+  gmtime_r(&jstEpoch, &jstTime);
+
   M5Dial.Rtc.setDateTime({
-    {static_cast<int16_t>(timeinfo.tm_year + 1900),
-     static_cast<int8_t>(timeinfo.tm_mon + 1),
-     static_cast<int8_t>(timeinfo.tm_mday)},
-    {static_cast<int8_t>(timeinfo.tm_hour),
-     static_cast<int8_t>(timeinfo.tm_min),
-     static_cast<int8_t>(timeinfo.tm_sec)}
+    {static_cast<int16_t>(jstTime.tm_year + 1900),
+     static_cast<int8_t>(jstTime.tm_mon + 1),
+     static_cast<int8_t>(jstTime.tm_mday)},
+    {static_cast<int8_t>(jstTime.tm_hour),
+     static_cast<int8_t>(jstTime.tm_min),
+     static_cast<int8_t>(jstTime.tm_sec)}
   });
 
   Serial.println("NTP time synced to RTC.");
@@ -158,8 +171,8 @@ void setup()
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
   sprite.createSprite(240,240);
-   
-  sprite.setSwapBytes(true);    
+
+  sprite.setSwapBytes(true);
   sprite.setSwapBytes(true);
   sprite.setTextDatum(4);
 
@@ -175,7 +188,7 @@ void setup()
 
     lx[i]=((r-6)*cos(rad*i))+sx;
     ly[i]=((r-6)*sin(rad*i))+sy;
-       
+
     if(i%30==0)
     {
       start[b]=i;
@@ -211,10 +224,10 @@ void drawClockFace() {
   m = String((int)dt.time.minutes/10) + String(dt.time.minutes%10);
 
   rAngle=rAngle-3;
-  angle=dt.time.seconds*6; 
+  angle=dt.time.seconds*6;
 
   if(dt.time.seconds<10){
-    s="0"+String(dt.time.seconds);  
+    s="0"+String(dt.time.seconds);
   }else{
     s=String(dt.time.seconds);
   }
@@ -230,7 +243,7 @@ void drawClockFace() {
   circle=circle+0.5;
   else
   circle=circle-0.5;
-  
+
   if(circle>140)
   dir=!dir;
 
@@ -241,17 +254,17 @@ void drawClockFace() {
 
   if(angle>-1)
   {
-     lastAngle=angle;      
+     lastAngle=angle;
 
      VALUE=((angle-270)/3.60)*-1;
      if(VALUE<0)
      VALUE=VALUE+100;
- 
-     
-     
+
+
+
  sprite.fillSprite(TFT_BLACK);
 sprite.setTextColor(TFT_WHITE,color5);
- 
+
 //sprite.drawString(days[now.dayOfTheWeek()],circle,120,2);
 sprite.loadFont(secFont);
 sprite.setTextColor(grays[1],TFT_BLACK);
@@ -289,7 +302,7 @@ sprite.loadFont(smallFont);
    sprite.drawString("VOLOS",120,190);
    sprite.drawString("***",120,114);
    sprite.setTextColor(grays[3],TFT_BLACK);
- 
+
   for(int i=0;i<60;i++)
   if(startP[i]+angle<360)
  sprite.fillSmoothCircle(px[startP[i]+angle],py[startP[i]+angle],1,grays[4],TFT_BLACK);
@@ -306,12 +319,12 @@ sprite.loadFont(smallFont);
  sprite.drawString(cc[i],x[(start[i]+angle)-360],y[(start[i]+angle)-360]);
  sprite.drawWedgeLine(px[(start[i]+angle)-360],py[(start[i]+angle)-360],lx[(start[i]+angle)-360],ly[(start[i]+angle)-360],2,2,grays[3],TFT_BLACK);
  }
- 
+
    sprite.drawWedgeLine(sx-1,sy-82,sx-1,sy-70,1,5,0xA380,TFT_BLACK);
    sprite.fillSmoothCircle(px[rAngle],py[rAngle],4,TFT_RED,TFT_BLACK);
    M5Dial.Display.pushImage(0,0,240,240,(uint16_t*)sprite.getPointer());
    sprite.unloadFont();
- 
+
 }
 
 }
