@@ -36,14 +36,16 @@ void switchToClockMode();
 
 namespace vibe {
 
-constexpr char kDeviceName[] = "VibeDial";
-constexpr char kManufacturer[] = "VibeWatch";
-constexpr char kModelNumber[] = "VibeWatch";
+// ChatGPT Desktop identifies a Codex Micro controller by this advertised
+// identity and PnP VID:PID pair. The name must remain an exact match.
+constexpr char kDeviceName[] = "Codex Micro";
+constexpr char kManufacturer[] = "Work Louder";
+constexpr char kModelNumber[] = "Codex Micro";
 constexpr char kFirmwareVersion[] = "v1.0";
 
 constexpr std::uint16_t kVendorId = 0x303A;
 constexpr std::uint16_t kProductId = 0x8360;
-constexpr std::uint16_t kProductVersion = 0x0001;
+constexpr std::uint16_t kProductVersion = 0x0101;
 
 constexpr std::uint8_t kVendorReportId = 6;
 constexpr std::size_t kBleReportLength = 63;
@@ -224,7 +226,7 @@ void loadPreferences() {
     if (g_deviceSlot < 1 || g_deviceSlot > 3) {
         g_deviceSlot = 1;
     }
-    std::snprintf(g_deviceName, sizeof(g_deviceName), "%s #%d", vibe::kDeviceName, g_deviceSlot);
+    std::snprintf(g_deviceName, sizeof(g_deviceName), "%s", vibe::kDeviceName);
 }
 
 void saveDeviceSlot(int slot) {
@@ -233,7 +235,7 @@ void saveDeviceSlot(int slot) {
     preferences.begin(kPreferencesNamespace, false);
     preferences.putUChar(kDeviceSlotKey, static_cast<std::uint8_t>(slot));
     preferences.end();
-    std::snprintf(g_deviceName, sizeof(g_deviceName), "%s #%d", vibe::kDeviceName, g_deviceSlot);
+    std::snprintf(g_deviceName, sizeof(g_deviceName), "%s", vibe::kDeviceName);
 }
 
 // -----------------------------------------------------------------------------
@@ -563,7 +565,7 @@ void initializeBle() {
 
     g_hid = new NimBLEHIDDevice(g_server);
     g_hid->setManufacturer(vibe::kManufacturer);
-    g_hid->setPnp(0x01, vibe::kVendorId, vibe::kProductId, vibe::kProductVersion);
+    g_hid->setPnp(0x02, vibe::kVendorId, vibe::kProductId, vibe::kProductVersion);
     g_hid->setHidInfo(0x00, 0x01);
     g_hid->setReportMap(vibe::kReportMap, sizeof(vibe::kReportMap));
 
@@ -598,7 +600,7 @@ void initializeBle() {
 
     auto* advertising = NimBLEDevice::getAdvertising();
     advertising->setName(g_deviceName);
-    advertising->setAppearance(HID_KEYBOARD);
+    advertising->setAppearance(GENERIC_HID);
     advertising->addServiceUUID(g_hid->getHidService()->getUUID());
     advertising->enableScanResponse(true);
     advertising->start();
