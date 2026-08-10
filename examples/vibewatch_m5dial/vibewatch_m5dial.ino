@@ -89,7 +89,6 @@ constexpr int kNgAction = 2;
 constexpr int kAgentOrbitRadius = 72;
 constexpr int kAgentButtonRadius = 18;
 constexpr int kMicButtonRadius = 26;
-constexpr int kLayerToggleRadius = 15;
 constexpr int kEncoderDivisor = 2;
 constexpr std::uint32_t kShortPressMs = 250;
 constexpr std::uint32_t kLayerToggleMs = 600;
@@ -118,7 +117,6 @@ enum class HitType {
     Agent,
     Action,
     Mic,
-    LayerToggle,
 };
 
 struct HitResult {
@@ -134,6 +132,10 @@ struct HitResult {
 std::array<AgentState, kAgentCount> g_agents;
 AmbientState g_ambient;
 String g_focusedApp;
+
+// Off-screen canvas used for flicker-free rendering: every frame is drawn
+// fully in RAM and blitted to the panel in a single transfer.
+M5Canvas g_canvas(&M5Dial.Display);
 
 NimBLEServer* g_server = nullptr;
 NimBLEHIDDevice* g_hid = nullptr;
@@ -179,7 +181,31 @@ std::uint16_t scaledColor(std::uint32_t packed, float brightness) {
     const auto r = static_cast<std::uint8_t>(((packed >> 16) & 0xFF) * scale);
     const auto g = static_cast<std::uint8_t>(((packed >> 8) & 0xFF) * scale);
     const auto b = static_cast<std::uint8_t>((packed & 0xFF) * scale);
-    return M5Dial.Display.color565(r, g, b);
+    return g_canvas.color565(r, g, b);
+}
+
+// Mirrors the pulsing/blinking agent effects from the original Vibe Watch
+// firmware so the M5Dial ring visually matches the main hardware.
+float effectBrightness(int effect, float brightness, float speed, std::uint32_t now) {
+    if (effect == 0 || brightness <= 0.0f) {
+        return 0.0f;
+    }
+    if (effect == 4 || effect == 6) {
+        const float hz = 0.35f + clamp01(speed) * 1.4f;
+        const float phase = static_cast<float>(now % 10000) * 0.001f * hz * 2.0f * static_cast<float>(M_PI);
+        const float low = effect == 6 ? 0.5f : 0.15f;
+        return brightness * (low + (1.0f - low) * (0.5f + 0.5f * std::sin(phase)));
+    }
+    return brightness;
+}
+
+bool uiIsAnimated() {
+    for (const auto& state : g_agents) {
+        if (state.effect == 4 || state.effect == 6) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void playSe(float frequency = 880.0f, std::uint32_t durationMs = 35) {
@@ -594,103 +620,221 @@ void initializePositions() {
 
 // -----------------------------------------------------------------------------
 // Rendering
+//
+// The glyphs and layered-ring styling below mirror the look of the original
+// Vibe Watch firmware (src/main.cpp): flat-filled circles with a bold accent
+// keyline, vector icons instead of text abbreviations, an Orbitron display
+// font, and a pill-shaped status readout.
 // -----------------------------------------------------------------------------
 
+// Position order matches the protocol mapping documented in README.md:
+// 0=FAST(ACT06), 1=NG(ACT07), 2=OK(ACT08), 3=PLAN(ACT09), 4=AI(ACT12).
+constexpr std::uint32_t kActionColors[kActionCount] = {
+    0x9D74FF, 0xFF3D00, 0x2979FF, 0x33C4E8, 0xE5E8EF,
+};
+
 const char* actionLabel(int index) {
-    static const char* kLabels[kActionCount] = {"FST", "NG", "OK", "PLN", "AI"};
+    static const char* kLabels[kActionCount] = {"FAST", "NG", "OK", "PLAN", "AI"};
     return kLabels[index];
 }
 
-void drawConnection(int fromX, int fromY, int toX, int toY, std::uint16_t color) {
-    M5Dial.Display.drawLine(fromX, fromY, toX, toY, color);
+void drawThickCircle(int x, int y, int radius, int thickness, std::uint16_t color) {
+    for (int i = 0; i < thickness; ++i) {
+        g_canvas.drawCircle(x, y, radius - i, color);
+    }
 }
 
-void drawRingItems() {
+void drawThickRoundRect(int x, int y, int width, int height, int radius, int thickness,
+                        std::uint16_t color) {
+    for (int i = 0; i < thickness; ++i) {
+        g_canvas.drawRoundRect(x + i, y + i, width - i * 2, height - i * 2,
+                                     std::max(1, radius - i), color);
+    }
+}
+
+void drawMicGlyph(int x, int y, std::uint16_t color) {
+    drawThickRoundRect(x - 8, y - 15, 16, 22, 7, 2, color);
+    g_canvas.drawWideLine(x - 12, y - 2, x - 12, y + 3, 1.6f, color);
+    g_canvas.drawWideLine(x + 12, y - 2, x + 12, y + 3, 1.6f, color);
+    g_canvas.drawWideLine(x - 12, y + 3, x - 8, y + 9, 1.6f, color);
+    g_canvas.drawWideLine(x + 12, y + 3, x + 8, y + 9, 1.6f, color);
+    g_canvas.drawWideLine(x - 8, y + 9, x + 8, y + 9, 1.6f, color);
+    g_canvas.drawWideLine(x, y + 9, x, y + 15, 1.6f, color);
+    g_canvas.drawWideLine(x - 6, y + 15, x + 6, y + 15, 1.6f, color);
+}
+
+void drawFastGlyph(int x, int y, std::uint16_t color) {
+    g_canvas.drawWideLine(x + 5, y - 9, x - 5, y, 2.4f, color);
+    g_canvas.drawWideLine(x - 5, y, x + 1, y, 2.4f, color);
+    g_canvas.drawWideLine(x + 1, y, x - 3, y + 9, 2.4f, color);
+    g_canvas.drawWideLine(x - 3, y + 9, x + 7, y - 2, 2.4f, color);
+}
+
+void drawApproveGlyph(int x, int y, std::uint16_t color) {
+    g_canvas.drawWideLine(x - 6, y, x - 2, y + 5, 2.4f, color);
+    g_canvas.drawWideLine(x - 2, y + 5, x + 7, y - 6, 2.4f, color);
+}
+
+void drawRejectGlyph(int x, int y, std::uint16_t color) {
+    g_canvas.drawWideLine(x - 6, y - 6, x + 6, y + 6, 2.4f, color);
+    g_canvas.drawWideLine(x + 6, y - 6, x - 6, y + 6, 2.4f, color);
+}
+
+void drawPlanGlyph(int x, int y, std::uint16_t color, bool enabled) {
+    drawThickRoundRect(x - 10, y - 5, 20, 10, 5, 1, color);
+    g_canvas.fillCircle(x + (enabled ? 5 : -5), y, 3, color);
+}
+
+void drawAssistantGlyph(int x, int y, std::uint16_t color) {
+    drawThickCircle(x, y, 8, 1, color);
+    g_canvas.drawWideLine(x - 4, y, x - 1, y - 3, 1.4f, color);
+    g_canvas.drawWideLine(x - 1, y - 3, x + 3, y - 2, 1.4f, color);
+    g_canvas.drawWideLine(x + 3, y - 2, x + 4, y + 2, 1.4f, color);
+    g_canvas.fillCircle(x - 2, y + 2, 1, color);
+    g_canvas.fillCircle(x + 2, y + 2, 1, color);
+}
+
+void drawActionGlyph(int index, int x, int y, std::uint16_t color) {
+    switch (index) {
+        case 0:
+            drawFastGlyph(x, y, color);
+            break;
+        case 1:
+            drawRejectGlyph(x, y, color);
+            break;
+        case 2:
+            drawApproveGlyph(x, y, color);
+            break;
+        case 3:
+            drawPlanGlyph(x, y, color, g_planModeEnabled);
+            break;
+        default:
+            drawAssistantGlyph(x, y, color);
+            break;
+    }
+}
+
+void drawRingItems(std::uint32_t now) {
     const int count = g_actionLayer ? kActionCount : kAgentCount;
     const int* xs = g_actionLayer ? g_actionX.data() : g_agentX.data();
     const int* ys = g_actionLayer ? g_actionY.data() : g_agentY.data();
+    const auto neutralFill = g_canvas.color565(17, 22, 28);
+    const auto neutralBorder = g_canvas.color565(105, 114, 132);
+
+    g_canvas.setFont(&fonts::Orbitron_Light_24);
 
     for (int i = 0; i < count; ++i) {
         const int x = xs[i];
         const int y = ys[i];
         const bool selected = (i == g_selected);
-        std::uint16_t color;
+        std::uint16_t fill = neutralFill;
+        std::uint16_t accent = neutralBorder;
 
         if (g_actionLayer) {
-            const std::uint32_t kActionColors[kActionCount] = {
-                0x00C853, 0xFF3D00, 0x2979FF, 0xAA00FF, 0xFFD600,
-            };
-            color = M5Dial.Display.color565((kActionColors[i] >> 16) & 0xFF,
-                                            (kActionColors[i] >> 8) & 0xFF,
-                                            kActionColors[i] & 0xFF);
-        } else {
-            color = scaledColor(g_agents[i].color, g_agents[i].brightness);
-            if (g_agents[i].color == 0) {
-                color = M5Dial.Display.color565(30, 30, 30);
+            accent = scaledColor(kActionColors[i], 1.0f);
+            const bool active = (i == 3) ? g_planModeEnabled : selected;
+            if (active) {
+                fill = accent;
             }
-        }
-
-        M5Dial.Display.fillCircle(x, y, kAgentButtonRadius, color);
-        if (selected) {
-            M5Dial.Display.drawCircle(x, y, kAgentButtonRadius + 2, 0xFFFFFF);
-            M5Dial.Display.drawCircle(x, y, kAgentButtonRadius + 3, 0xFFFFFF);
         } else {
-            M5Dial.Display.drawCircle(x, y, kAgentButtonRadius, 0x7BEF);
+            const auto& state = g_agents[i];
+            const float brightness =
+                effectBrightness(state.effect, state.brightness, state.speed, now);
+            fill = (state.effect == 0 || state.color == 0)
+                       ? neutralFill
+                       : scaledColor(state.color, brightness);
+            accent = g_canvas.color565(163, 132, 255);
         }
 
-        M5Dial.Display.setTextColor(WHITE);
-        M5Dial.Display.setTextDatum(middle_center);
-        M5Dial.Display.setTextSize(1);
+        g_canvas.fillCircle(x, y, kAgentButtonRadius, fill);
+        if (selected && !g_actionLayer) {
+            // Two-tone selection halo, matching the layered ring used by the
+            // original firmware's agent selector.
+            drawThickCircle(x, y, kAgentButtonRadius + 3, 2, g_canvas.color565(74, 56, 128));
+            drawThickCircle(x, y, kAgentButtonRadius, 3, accent);
+            drawThickCircle(x, y, kAgentButtonRadius - 3, 1, TFT_WHITE);
+        } else if (selected && g_actionLayer) {
+            drawThickCircle(x, y, kAgentButtonRadius, 3, accent);
+            drawThickCircle(x, y, kAgentButtonRadius - 3, 1, TFT_WHITE);
+        } else {
+            drawThickCircle(x, y, kAgentButtonRadius, 2, accent);
+        }
+
         if (g_actionLayer) {
-            M5Dial.Display.drawString(actionLabel(i), x, y);
+            drawActionGlyph(i, x, y - 4, TFT_WHITE);
+            g_canvas.setTextDatum(middle_center);
+            g_canvas.setTextSize(0.42f);
+            g_canvas.setTextColor(TFT_WHITE);
+            g_canvas.drawString(actionLabel(i), x, y + kAgentButtonRadius + 9);
+        } else {
+            const int fillRed = ((fill >> 11) & 0x1F) * 255 / 31;
+            const int fillGreen = ((fill >> 5) & 0x3F) * 255 / 63;
+            const int fillBlue = (fill & 0x1F) * 255 / 31;
+            const int fillLuminance = (fillRed * 299 + fillGreen * 587 + fillBlue * 114) / 1000;
+            g_canvas.setTextDatum(middle_center);
+            g_canvas.setTextSize(0.52f);
+            g_canvas.setTextColor(fillLuminance >= 150 ? TFT_BLACK : TFT_WHITE);
+            char label[2];
+            std::snprintf(label, sizeof(label), "%d", i + 1);
+            g_canvas.drawString(label, x, y);
         }
     }
+
+    g_canvas.setFont(nullptr);
 }
 
 void drawCenterMic() {
-    const std::uint16_t color = g_micActive ? 0xF800 : 0x304FFE;
-    M5Dial.Display.fillCircle(kScreenCenter, kScreenCenter, kMicButtonRadius, color);
-    M5Dial.Display.setTextColor(WHITE);
-    M5Dial.Display.setTextDatum(middle_center);
-    M5Dial.Display.setTextSize(1);
-    M5Dial.Display.drawString("MIC", kScreenCenter, kScreenCenter);
-}
-
-void drawLayerToggle() {
-    const int x = kScreenCenter;
-    const int y = kScreenSize - 28;
-    const std::uint16_t color = g_actionLayer ? 0xAA00FF : 0x2979FF;
-    M5Dial.Display.fillCircle(x, y, kLayerToggleRadius, color);
-    M5Dial.Display.setTextColor(WHITE);
-    M5Dial.Display.setTextDatum(middle_center);
-    M5Dial.Display.setTextSize(1);
-    M5Dial.Display.drawString(g_actionLayer ? "AGENT" : "ACT", x, y);
+    const bool micPressed = g_micActive;
+    const auto accent = g_canvas.color565(48, 79, 254);
+    const auto fill = micPressed ? accent : g_canvas.color565(25, 31, 40);
+    g_canvas.fillCircle(kScreenCenter, kScreenCenter, kMicButtonRadius, fill);
+    drawThickCircle(kScreenCenter, kScreenCenter, kMicButtonRadius, micPressed ? 3 : 2,
+                    micPressed ? TFT_WHITE : accent);
+    drawMicGlyph(kScreenCenter, kScreenCenter - 1, TFT_WHITE);
 }
 
 void drawStatusBar() {
-    M5Dial.Display.setTextColor(0xC618);
-    M5Dial.Display.setTextDatum(top_center);
-    M5Dial.Display.setTextSize(1);
+    const auto panel = g_canvas.color565(21, 24, 31);
+    const auto stateColor = g_connected ? g_canvas.color565(66, 232, 139)
+                                        : g_canvas.color565(255, 174, 54);
+    const int panelWidth = 150;
+    const int panelHeight = 20;
+    const int panelX = kScreenCenter - panelWidth / 2;
+    const int panelY = 4;
 
-    const char* mode = g_actionLayer ? "ACTION" : "AGENT";
-    const int y = 4;
-    M5Dial.Display.drawString(mode, kScreenCenter, y);
+    g_canvas.fillRoundRect(panelX, panelY, panelWidth, panelHeight, panelHeight / 2, panel);
+    drawThickRoundRect(panelX, panelY, panelWidth, panelHeight, panelHeight / 2, 1, stateColor);
 
-    if (!g_connected) {
-        M5Dial.Display.setTextColor(0xF800);
-        M5Dial.Display.drawString("BLE", kScreenCenter, 18);
-    } else if (!g_focusedApp.isEmpty()) {
-        M5Dial.Display.setTextColor(0x07E0);
-        M5Dial.Display.drawString(g_focusedApp.c_str(), kScreenCenter, 18);
+    char status[40];
+    std::snprintf(status, sizeof(status), "%s  %s  #%d  %u%%%s",
+                  g_actionLayer ? "ACT" : "AGT", g_connected ? "ON" : "PAIR", g_deviceSlot,
+                  g_batteryLevel, g_isCharging ? "+" : "");
+
+    g_canvas.setFont(&fonts::Orbitron_Light_24);
+    g_canvas.setTextSize(0.42f);
+    g_canvas.setTextDatum(middle_center);
+    g_canvas.setTextColor(TFT_WHITE, panel);
+    g_canvas.drawString(status, kScreenCenter, panelY + panelHeight / 2 + 1);
+    g_canvas.setFont(nullptr);
+
+    if (!g_focusedApp.isEmpty()) {
+        g_canvas.setTextSize(1);
+        g_canvas.setTextDatum(top_center);
+        g_canvas.setTextColor(g_canvas.color565(120, 220, 160), TFT_BLACK);
+        g_canvas.drawString(g_focusedApp.c_str(), kScreenCenter, panelY + panelHeight + 4);
     }
 }
 
 void renderUi() {
-    M5Dial.Display.clear();
-    drawRingItems();
+    // Draw into an off-screen canvas and blit it in one shot. Clearing and
+    // redrawing straight on the panel caused visible flicker, especially
+    // while an agent's pulse/blink effect keeps the UI continuously dirty.
+    const std::uint32_t now = millis();
+    g_canvas.fillScreen(TFT_BLACK);
+    drawRingItems(now);
     drawCenterMic();
-    drawLayerToggle();
     drawStatusBar();
+    g_canvas.pushSprite(0, 0);
 }
 
 // -----------------------------------------------------------------------------
@@ -698,13 +842,6 @@ void renderUi() {
 // -----------------------------------------------------------------------------
 
 HitResult hitTest(int x, int y) {
-    // Layer toggle at the bottom.
-    const int toggleDx = x - kScreenCenter;
-    const int toggleDy = y - (kScreenSize - 28);
-    if (toggleDx * toggleDx + toggleDy * toggleDy <= kLayerToggleRadius * kLayerToggleRadius) {
-        return HitResult(HitType::LayerToggle, 0);
-    }
-
     // Center microphone.
     const int centerDx = x - kScreenCenter;
     const int centerDy = y - kScreenCenter;
@@ -801,9 +938,6 @@ void handleTouch() {
             case HitType::Mic:
                 triggerMic(true);
                 break;
-            case HitType::LayerToggle:
-                toggleActionLayer();
-                break;
             default:
                 break;
         }
@@ -841,19 +975,60 @@ void updateBattery(bool notify) {
     }
 }
 
-void showSplashScreen() {
-    M5Dial.Display.clear();
-    M5Dial.Display.setTextColor(WHITE);
-    M5Dial.Display.setTextDatum(middle_center);
-    M5Dial.Display.setTextSize(2);
-    M5Dial.Display.drawString("VibeDial", kScreenCenter, kScreenCenter - 20);
-    M5Dial.Display.setTextSize(1);
-    M5Dial.Display.drawString(vibe::kFirmwareVersion, kScreenCenter, kScreenCenter + 20);
+// Mirrors the boot animation in the original firmware: an expanding accent
+// ring with six orbiting dots previewing the Agent layer, then the wordmark
+// fades in using the same Orbitron display font as the rest of the UI.
+void drawSplashFrame(float progress) {
+    const float eased = 1.0f - std::pow(1.0f - clamp01(progress), 3.0f);
+    const float rawFade = clamp01(progress / 0.68f);
+    const float textFade = rawFade * rawFade * (3.0f - 2.0f * rawFade);
+    const float pulse = 0.78f + 0.22f * std::sin(progress * static_cast<float>(M_PI) * 4.0f);
 
-    M5Dial.Speaker.tone(880, 50);
+    g_canvas.fillScreen(TFT_BLACK);
+
+    const int ringRadius = 36 + static_cast<int>(28.0f * eased);
+    drawThickCircle(kScreenCenter, kScreenCenter, ringRadius + 4, 1, scaledColor(0x34284F, textFade));
+    drawThickCircle(kScreenCenter, kScreenCenter, ringRadius, 2, scaledColor(0x9D74FF, textFade * pulse));
+
+    for (int i = 0; i < kAgentCount; ++i) {
+        const float revealAt = 0.10f + i * 0.075f;
+        if (progress < revealAt) {
+            continue;
+        }
+        const float dotFade = clamp01((progress - revealAt) / 0.18f);
+        const float angle = -M_PI_2 + i * 2.0f * M_PI / kAgentCount;
+        const int x = kScreenCenter + static_cast<int>(std::cos(angle) * 82.0f);
+        const int y = kScreenCenter + static_cast<int>(std::sin(angle) * 82.0f);
+        g_canvas.fillCircle(x, y, 3 + static_cast<int>(1.5f * dotFade),
+                                  scaledColor(i % 2 == 0 ? 0x9D74FF : 0x33C4E8, dotFade));
+    }
+
+    g_canvas.setFont(&fonts::Orbitron_Light_24);
+    g_canvas.setTextDatum(middle_center);
+    g_canvas.setTextSize(0.68f);
+    g_canvas.setTextColor(scaledColor(0x9D74FF, textFade), TFT_BLACK);
+    g_canvas.drawString("VIBEDIAL", kScreenCenter, kScreenCenter - 4);
+
+    g_canvas.setTextSize(0.4f);
+    g_canvas.setTextColor(scaledColor(0xAAB4C8, textFade * 0.85f), TFT_BLACK);
+    g_canvas.drawString(vibe::kFirmwareVersion, kScreenCenter, kScreenCenter + 18);
+    g_canvas.setFont(nullptr);
+
+    g_canvas.pushSprite(0, 0);
+}
+
+void showSplashScreen() {
+    constexpr int kFrameCount = 24;
+    for (int frame = 0; frame <= kFrameCount; ++frame) {
+        drawSplashFrame(static_cast<float>(frame) / kFrameCount);
+        if (frame == 4) {
+            M5Dial.Speaker.tone(880, 50);
+        } else if (frame == 14) {
+            M5Dial.Speaker.tone(1320, 80);
+        }
+        delay(kSplashHoldMs / kFrameCount);
+    }
     delay(120);
-    M5Dial.Speaker.tone(1320, 80);
-    delay(kSplashHoldMs);
 }
 
 // -----------------------------------------------------------------------------
@@ -867,6 +1042,15 @@ void setup() {
     M5Dial.begin(cfg, true, false);  // enable encoder, disable RFID
     M5Dial.Display.setBrightness(80);
     M5Dial.Display.setRotation(0);
+
+    g_canvas.setColorDepth(16);
+    g_canvas.setPsram(false);
+    if (g_canvas.createSprite(kScreenSize, kScreenSize) == nullptr) {
+        Serial.println("Failed to allocate UI canvas");
+        while (true) {
+            delay(1000);
+        }
+    }
 
     loadPreferences();
     updateBattery(false);
@@ -905,6 +1089,9 @@ void loop() {
         g_lastBatteryUpdate = now;
     }
 
+    if (uiIsAnimated()) {
+        g_uiDirty = true;
+    }
     if (g_uiDirty && now - g_lastUiDraw >= kUiPeriodMs) {
         renderUi();
         g_lastUiDraw = now;

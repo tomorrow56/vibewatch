@@ -20,7 +20,6 @@ host software does not need any changes.
 | **Encoder push button long press (≥ 600 ms)** | Toggle between Agent layer and Action layer |
 | **Touch ring** | Tap an agent or action to activate it directly |
 | **Touch center** | Hold-to-talk microphone (ACT10/ACT11) |
-| **Touch bottom button** | Toggle between Agent layer and Action layer |
 
 ### Action layer
 
@@ -33,6 +32,16 @@ The 5 actions are mapped to the same report IDs as the original Vibe Watch:
 | 2 | OK | ACT08 |
 | 3 | PLAN | ACT09 (toggles plan mode) |
 | 4 | AI | ACT12 |
+
+## Visual style
+
+The UI mirrors the look of the main Vibe Watch firmware (`src/main.cpp`):
+flat-filled circles with a bold accent keyline, vector glyph icons (mic,
+lightning bolt, check, X, plan pill, assistant face) instead of plain text
+abbreviations, a two-tone selection halo on the active agent, an Orbitron
+display font for labels and the status readout, and a boot animation with
+an expanding accent ring and six orbiting dots that previews the Agent
+layer.
 
 ## Dependencies
 
