@@ -45,7 +45,7 @@ DualShock 3  --(Bluetooth Classic)-->  ESP32 #1（本サンプル）
 
 | ESP32 ピン | 赤外線 LED 回路 |
 |---|---|
-| GPIO 4 | NPN トランジスタのベース（約470Ωの抵抗を経由） |
+| GPIO 21 | NPN トランジスタのベース（約470Ωの抵抗を経由） |
 | 3.3V / 5V | 赤外線 LED アノード（電流制限抵抗を経由） |
 | GND | トランジスタのエミッタ / 赤外線 LED カソード側 |
 
@@ -67,6 +67,37 @@ lib_deps =
     jvpernis/PS3 Controller Host @ ^1.1.0
     crankyoldgit/IRremoteESP8266 @ ^2.8.0
 ```
+
+> **新しいESP32コアでのArduino IDEビルドエラーについて:** 比較的新しい
+> ESP32 Arduinoコア（3.3.10で確認）では、`PS3 Controller Host` v1.1.0
+> のビルド時に以下のエラーが出ることがあります。
+>
+> ```text
+> ps3.c:287:5: error: implicit declaration of function 'esp_base_mac_addr_set'
+> ```
+>
+> これは、新しいESP-IDFでMAC関連のAPI宣言が `esp_system.h` から
+> `esp_mac.h` に分離されたにもかかわらず、ライブラリ側が
+> `esp_mac.h` をincludeしていないために発生します。対処法は、
+> `~/Documents/Arduino/libraries/PS3_Controller_Host/src/ps3.c` の
+> 冒頭付近（既存の `#include <esp_system.h>` の近く）に
+> `#include <esp_mac.h>` を追加することです。この修正はお使いの
+> Arduinoライブラリフォルダに対するローカルな変更なので、ライブラリを
+> 再インストール・更新すると上書きされて消えます。その場合は同じ1行を
+> 再度追加してください。
+
+> **新しいESP32コアでの実行時の不具合（MACアドレスが空になる）:**
+> 比較的新しいESP32 Arduinoコア（3.3.10で確認）は、Bluetooth Classicを
+> 使うライブラリだと明示的にマークされていないと、起動時に自動でBT
+> クラシック用メモリ（約36KB）を解放してしまいます。`PS3 Controller
+> Host` はこの仕組みより前に作られたライブラリのため、対策をしないと
+> `Ps3.begin()` が何のエラーメッセージも出さずに（Core Debug Levelを
+> 上げても）静かに失敗し、`Ps3.getAddress()` が空文字を返します。
+> 本サンプルではすでに `esp32-hal-alloc-bt-classic-mem.h` を
+> include することでこれを回避済み（このヘッダが無い古いコアでも
+> 問題ないよう `__has_include` でガード済み）なので、利用者側での
+> 追加対応は不要です。他のスケッチで同じ症状に遭遇した場合の参考として
+> ここに記載しています。
 
 ## セットアップ手順
 
@@ -142,12 +173,13 @@ lib_deps =
 | 十字キー 左 | エージェント4選択 | `IR_CODE_AGENT_4` |
 | L1 | エージェント5選択 | `IR_CODE_AGENT_5` |
 | R1 | エージェント6選択 | `IR_CODE_AGENT_6` |
-| ×（クロス） | FAST アクション | `IR_CODE_FAST` |
+| ×（クロス） | NG アクション | `IR_CODE_NG` |
 | ○（サークル） | OK アクション | `IR_CODE_OK` |
-| □（スクエア） | NG アクション | `IR_CODE_NG` |
+| □（スクエア） | MIC 録音のオン/オフ切り替え | `IR_CODE_MIC` |
 | △（トライアングル） | AI アクション | `IR_CODE_AI` |
-| Start | プランモード切り替え | `IR_CODE_PLAN` |
-| PS ボタン | MIC 録音のオン/オフ切り替え | `IR_CODE_MIC` |
+| Start | AI アクション | `IR_CODE_AI` |
+| Select | プランモード切り替え | `IR_CODE_PLAN` |
+| PS ボタン | FAST アクション | `IR_CODE_FAST` |
 | 左スティック 左/右/上/下 | アナログスティック操作 | `IR_CODE_LEFT` / `IR_CODE_RIGHT` / `IR_CODE_UP` / `IR_CODE_DOWN` |
 
 > **重要:** これらの赤外線コードの値は `vibewatch_ir_remote.ino` の

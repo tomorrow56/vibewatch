@@ -45,7 +45,7 @@ DualShock 3  --(Bluetooth Classic)-->  ESP32 #1 (this sketch)
 
 | ESP32 Pin | IR LED Circuit |
 |---|---|
-| GPIO 4 | Base of NPN transistor (through a ~470 Ohm resistor) |
+| GPIO 21 | Base of NPN transistor (through a ~470 Ohm resistor) |
 | 3.3 V / 5V | IR LED anode (through a current-limiting resistor) |
 | GND | Transistor emitter / IR LED cathode side |
 
@@ -67,6 +67,34 @@ lib_deps =
     jvpernis/PS3 Controller Host @ ^1.1.0
     crankyoldgit/IRremoteESP8266 @ ^2.8.0
 ```
+
+> **Arduino IDE build error with newer ESP32 cores:** With recent ESP32
+> Arduino core versions (observed on 3.3.10), compiling `PS3 Controller
+> Host` v1.1.0 may fail with:
+>
+> ```text
+> ps3.c:287:5: error: implicit declaration of function 'esp_base_mac_addr_set'
+> ```
+>
+> This happens because newer ESP-IDF versions moved MAC-related
+> declarations out of `esp_system.h` into `esp_mac.h`, which the library
+> does not include. Fix it by adding `#include <esp_mac.h>` near the top
+> of `~/Documents/Arduino/libraries/PS3_Controller_Host/src/ps3.c` (next
+> to the existing `#include <esp_system.h>` line). This edit is local to
+> your Arduino libraries folder and will be overwritten if you
+> reinstall/update the library, so you may need to reapply it.
+
+> **Runtime failure on newer ESP32 cores (empty MAC address):** Newer
+> ESP32 Arduino cores (observed on 3.3.10) automatically free the ~36 KB
+> of classic Bluetooth controller memory at boot unless a library marks
+> itself as needing Classic BT. `PS3 Controller Host` predates that
+> mechanism, so without a fix `Ps3.begin()` silently fails and
+> `Ps3.getAddress()` prints an empty string, with no error message even
+> at a high Core Debug Level. This sketch already works around it by
+> including `esp32-hal-alloc-bt-classic-mem.h` (guarded with
+> `__has_include` so it's a no-op on older cores that don't have this
+> header), so no action is needed on your part -- this is documented here
+> in case you see the same symptom in a different sketch.
 
 ## Setup
 
@@ -137,12 +165,13 @@ lib_deps =
 | D-Pad Left | Select agent 4 | `IR_CODE_AGENT_4` |
 | L1 | Select agent 5 | `IR_CODE_AGENT_5` |
 | R1 | Select agent 6 | `IR_CODE_AGENT_6` |
-| Cross (X) | FAST action | `IR_CODE_FAST` |
+| Cross (X) | NG action | `IR_CODE_NG` |
 | Circle (O) | OK action | `IR_CODE_OK` |
-| Square | NG action | `IR_CODE_NG` |
+| Square | Toggle MIC recording | `IR_CODE_MIC` |
 | Triangle | AI action | `IR_CODE_AI` |
-| Start | Toggle plan mode | `IR_CODE_PLAN` |
-| PS button | Toggle MIC recording | `IR_CODE_MIC` |
+| Start | AI action | `IR_CODE_AI` |
+| Select | Toggle plan mode | `IR_CODE_PLAN` |
+| PS button | FAST action | `IR_CODE_FAST` |
 | Left stick left/right/up/down | Analog stick nav | `IR_CODE_LEFT` / `IR_CODE_RIGHT` / `IR_CODE_UP` / `IR_CODE_DOWN` |
 
 > **Important:** these IR code values must match the `#define` values in

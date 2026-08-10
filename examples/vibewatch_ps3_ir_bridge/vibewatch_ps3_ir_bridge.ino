@@ -26,7 +26,19 @@
  * Dependencies:
  *   - jvpernis/esp32-ps3 (PS3 Controller Host)
  *   - crankyoldgit/IRremoteESP8266
+ *
+ * Note on newer ESP32 Arduino cores (3.x, observed starting around core
+ * 3.3.x): by default the core frees the ~36 KB of classic Bluetooth
+ * controller memory at boot unless a library marks itself as needing
+ * Classic BT. jvpernis/esp32-ps3 predates that mechanism, so without the
+ * include below `btStart()` silently fails (Classic BT memory was already
+ * released before setup() runs). Older cores don't have this header at
+ * all, so the include is guarded with __has_include for compatibility.
  */
+
+#if __has_include(<esp32-hal-alloc-bt-classic-mem.h>)
+#include <esp32-hal-alloc-bt-classic-mem.h>
+#endif
 
 #include <Arduino.h>
 #include <IRremoteESP8266.h>
@@ -35,12 +47,13 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 // -----------------------------------------------------------------------------
 // Hardware configuration
 // -----------------------------------------------------------------------------
 
-constexpr std::uint8_t kIrSendPin = 4;
+constexpr std::uint8_t kIrSendPin = 21;
 
 // MAC address the ESP32 will present to the DualShock 3. The controller only
 // connects to whichever host MAC it was last paired to (normally a PS3
@@ -92,12 +105,13 @@ IRsend irsend(kIrSendPin);
 // | D-Pad Left    | Agent 4          |
 // | L1            | Agent 5          |
 // | R1            | Agent 6          |
-// | Cross (X)     | FAST             |
+// | Cross (X)     | NG               |
 // | Circle (O)    | OK               |
-// | Square        | NG               |
+// | Square        | MIC (toggle)     |
 // | Triangle      | AI               |
-// | Start         | PLAN             |
-// | PS button     | MIC (toggle)     |
+// | Start         | AI               |
+// | Select        | PLAN             |
+// | PS button     | FAST             |
 // | Left stick    | LEFT/RIGHT/UP/DOWN (analog joystick, edge-triggered) |
 // -----------------------------------------------------------------------------
 
@@ -110,11 +124,51 @@ StickDirection g_lastStickDirection = StickDirection::kNone;
 
 // -----------------------------------------------------------------------------
 // IR transmit helper
+//
+// IRsend on ESP32 (via this IRremoteESP8266 version) generates the 38 kHz
+// NEC carrier in software using delayMicroseconds() loops rather than the
+// RMT peripheral, so its bit timing is vulnerable to being jittered by
+// other high-priority interrupt/task activity. In this sketch the DualShock
+// 3 connection keeps the classic Bluetooth (Bluedroid) stack busy, and
+// calling irsend.sendNEC() directly from the PS3 notify callback (which
+// runs in that same Bluetooth-related context) was observed to corrupt the
+// transmitted waveform badly enough that the receiving board couldn't
+// decode it as NEC at all.
+//
+// To avoid that, actual transmission happens on a dedicated FreeRTOS task
+// pinned to the core opposite the Bluetooth controller (which defaults to
+// core 0) at a high priority, so it isn't preempted mid-frame. Callers only
+// enqueue a request; irSendTask() does the real, timing-sensitive work.
 // -----------------------------------------------------------------------------
 
+struct IrSendRequest {
+  std::uint32_t code;
+  char label[8];
+};
+
+QueueHandle_t g_irSendQueue = nullptr;
+
 void sendIrCode(std::uint32_t code, const char* label) {
-  irsend.sendNEC(code, 32);
-  Serial.printf("IR TX %-6s: 0x%08X\n", label, code);
+  if (g_irSendQueue == nullptr) {
+    return;
+  }
+  IrSendRequest request;
+  request.code = code;
+  std::strncpy(request.label, label, sizeof(request.label) - 1);
+  request.label[sizeof(request.label) - 1] = '\0';
+  if (xQueueSend(g_irSendQueue, &request, 0) != pdTRUE) {
+    Serial.println("IR send queue full, dropping code");
+  }
+}
+
+void irSendTask(void*) {
+  IrSendRequest request;
+  for (;;) {
+    if (xQueueReceive(g_irSendQueue, &request, portMAX_DELAY) == pdTRUE) {
+      irsend.sendNEC(request.code, 32);
+      Serial.printf("IR TX %-6s: 0x%08X\n", request.label, request.code);
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -136,13 +190,14 @@ void handleButtons() {
   if (down.l1)       sendIrCode(IR_CODE_AGENT_5, "AGENT5");
   if (down.r1)       sendIrCode(IR_CODE_AGENT_6, "AGENT6");
 
-  if (down.cross)    sendIrCode(IR_CODE_FAST, "FAST");
+  if (down.cross)    sendIrCode(IR_CODE_NG, "NG");
   if (down.circle)   sendIrCode(IR_CODE_OK, "OK");
-  if (down.square)   sendIrCode(IR_CODE_NG, "NG");
+  if (down.square)   sendIrCode(IR_CODE_MIC, "MIC");
   if (down.triangle) sendIrCode(IR_CODE_AI, "AI");
-  if (down.start)    sendIrCode(IR_CODE_PLAN, "PLAN");
+  if (down.start)    sendIrCode(IR_CODE_AI, "AI");
+  if (down.select)   sendIrCode(IR_CODE_PLAN, "PLAN");
 
-  if (down.ps)       sendIrCode(IR_CODE_MIC, "MIC");
+  if (down.ps)       sendIrCode(IR_CODE_FAST, "FAST");
 }
 
 void handleStick() {
@@ -206,14 +261,35 @@ void setup() {
 
   irsend.begin();
 
+  g_irSendQueue = xQueueCreate(8, sizeof(IrSendRequest));
+  if (g_irSendQueue == nullptr) {
+    Serial.println("Failed to create IR send queue");
+    while (true) {
+      delay(1000);
+    }
+  }
+  // Core 1 (APP_CPU) is where Arduino's setup()/loop() normally run; the
+  // classic Bluetooth controller defaults to core 0 (PRO_CPU). Pinning the
+  // IR task to core 1 at a high priority keeps its precise bit-banged
+  // timing from being interrupted by Bluetooth activity on core 0.
+  xTaskCreatePinnedToCore(irSendTask, "IrSendTask", 4096, nullptr,
+                          configMAX_PRIORITIES - 1, nullptr, 1);
+
   Ps3.attach(onPs3Notify);
   Ps3.attachOnConnect(onPs3Connect);
   Ps3.attachOnDisconnect(onPs3Disconnect);
 
+  bool started;
   if (sizeof(kControllerHostMac) > 1) {
-    Ps3.begin(kControllerHostMac);
+    started = Ps3.begin(kControllerHostMac);
   } else {
-    Ps3.begin();
+    started = Ps3.begin();
+  }
+
+  if (!started) {
+    Serial.println("Ps3.begin() FAILED. If ESP32 Bluetooth MAC prints "
+                    "empty below, see the note about "
+                    "esp32-hal-alloc-bt-classic-mem.h in the README.");
   }
 
   Serial.print("ESP32 Bluetooth MAC: ");
@@ -225,4 +301,18 @@ void loop() {
   // All input handling happens in onPs3Notify(), which the PS3 Controller
   // Host library calls whenever a new report arrives over Bluetooth.
   delay(20);
+
+#if 0
+  // TEMPORARY DIAGNOSTIC: send a fixed IR code every 2 seconds, regardless
+  // of Bluetooth/PS3 state, to check whether Classic BT activity is
+  // corrupting the IR waveform. Flip to `#if 1` to enable, reflash, and
+  // watch the receiver's Serial output. If this decodes correctly and
+  // consistently as 0x807F18E7 even while a DualShock 3 is connected, the
+  // corruption is not caused by Bluetooth interference.
+  static uint32_t lastSend = 0;
+  if (millis() - lastSend > 2000) {
+    sendIrCode(IR_CODE_AGENT_1, "DIAG");
+    lastSend = millis();
+  }
+#endif
 }
